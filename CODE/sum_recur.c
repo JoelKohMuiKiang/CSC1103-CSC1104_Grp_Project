@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include "timing.h"
+#include "led.h"
 
 #define N 10000
 #define REPETITIONS 10000
