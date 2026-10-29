@@ -3,8 +3,8 @@
 #include <string.h>
 #include "trade_io.h"
 
-#define SHORT_WINDOW 3
-#define LONG_WINDOW  5
+#define SHORT_WINDOW 40
+#define LONG_WINDOW  200
 #define PLOT_TRADES  2000
 
 /* ---------- One-second OHLC bar state ---------- */
@@ -216,7 +216,7 @@ int main(int argc, char *argv[])
         }
 
         /* 8. Write data slice to file if in plotting mode. */
-        if (plotting && t >= plot_start && t < plot_start + PLOT_TRADES) {
+        if (plotting && have_short_sma && have_long_sma && t >= plot_start && t < plot_start + PLOT_TRADES) {
             fprintf(out, "%lld %.8f %.8f %.8f %d\n", t, p, sma_short, sma_long, signal);
             plot_rows++;
             if (signal == 1) {
