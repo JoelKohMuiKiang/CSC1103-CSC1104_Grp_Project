@@ -25,10 +25,12 @@
  * GROUP_FOLDER: your group's folder inside DATA_FOLDER.
  */
 #ifndef DATA_FOLDER
-#define DATA_FOLDER  "/Users/lawrenceseow/Documents/work/Glasgow/Teaching/JointDegree/2026_2027/Trim_1/CSC1103 /Assignment/pm-data/dataset_BTCUSDT_2026-08-21"
+// #define DATA_FOLDER  "/Users/lawrenceseow/Documents/work/Glasgow/Teaching/JointDegree/2026_2027/Trim_1/CSC1103 /Assignment/pm-data/dataset_BTCUSDT_2026-08-21"
+#define DATA_FOLDER "D:/CSC1103/CSC1103-CSC1104_Grp_Project_ChristabelCopy"
 #endif
 #ifndef GROUP_FOLDER
-#define GROUP_FOLDER "Group01"
+// #define GROUP_FOLDER "Group01"
+#define GROUP_FOLDER "DATABASE"
 #endif
 
 /* ================= The three data files =================
