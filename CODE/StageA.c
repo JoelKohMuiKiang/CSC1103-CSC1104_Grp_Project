@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "trade_io.h"
+// #include "trade_io.h"
+#include "StageA+.h"
 
 // #define SHORT_WINDOW 40
 // #define LONG_WINDOW  200
@@ -12,16 +13,18 @@
 #define MAX_WINDOW   200
 #define PLOT_TRADES  2000
 
+#define TEST_PATH "C:/Users/joelk/Documents/UNI/YEAR 1/TRI 1/CSC1103-Programming Methodology/PROJECT/DATABASE/test20.csv"
+#define DEV_PATH  "C:/Users/joelk/Documents/UNI/YEAR 1/TRI 1/CSC1103-Programming Methodology/PROJECT/DATABASE/dev_1M.csv"
+
 /* ---------- One-second OHLC bar state ---------- */
 double ohlc_open = 0.0, ohlc_high = 0.0, ohlc_low = 0.0, ohlc_close = 0.0;
 long long current_sec = -1;
 int ohlc_count = 0;            /* trades in the current bar */
 
 /* Update the bar with one trade; print the finished bar when the second changes. */
-static void update_ohlc(double p, int print_bars)
-{
-    long long raw_sec = trade_time();     
-    long long trade_sec = raw_sec / 1000000LL;  /* integer division drops the microseconds */
+static void update_ohlc(long long ts, double p, int print_bars)
+{     
+    long long trade_sec = ts / 1000000LL;  /* integer division drops the microseconds */
 
     if (trade_sec != current_sec) {
         if (current_sec != -1 && print_bars) {
@@ -68,8 +71,10 @@ int main(int argc, char *argv[])
     int short_window = plotting ? GROUP_SHORT : TEST_SHORT;
     int long_window  = plotting ? GROUP_LONG  : TEST_LONG;
 
-    /* Open the correct dataset using your helper library. */
-    if (!open_data(plotting ? DEV : TEST20)) {
+    /* Open the dataset with fopen. */
+    FILE *fp = fopen(plotting ? DEV_PATH : TEST_PATH, "r");
+    if (fp == NULL) {
+        printf("Could not open data file\n");
         return 1;
     }
 
@@ -80,7 +85,7 @@ int main(int argc, char *argv[])
 
         if (out == NULL) {
             printf("Could not create signals.dat\n");
-            close_trades();
+            fclose(fp);
             return 1;
         }
     }
@@ -112,6 +117,11 @@ int main(int argc, char *argv[])
     long long plot_buys = 0;
     long long plot_sells = 0;
 
+    long long ts;
+    double p, q;
+    int is_buy;
+    long long t = 0;     
+
     /* Print structural headers matching your target layout */
     if (!plotting) {
         printf("Expected answers for test20.csv (short window = %d, long window = %d)\n", short_window, long_window);
@@ -122,11 +132,8 @@ int main(int argc, char *argv[])
                "trade", "price", "qty", "is_buy", "VWAP", "SMA_3", "SMA_5", "signal");
     }
 
-    while (next_trade()) {
-        long long t = trade_number();
-        double p = trade_price();
-        double q = trade_qty();
-        int is_buy = trade_is_buy();
+    while (read_trade(fp, &ts, &p, &q, &is_buy)) {
+        t++;
 
         total_trades++;
 
@@ -136,7 +143,7 @@ int main(int argc, char *argv[])
         double vwap = (total_qty > 0.0) ? (total_price_qty / total_qty) : 0.0;
 
         /* 2. Update the one-second OHLC bar (printed only in test mode). */
-        update_ohlc(p, !plotting);
+        update_ohlc(ts, p, !plotting);
 
         /* 3. Update short circular window. */
         if (short_count == short_window) {
@@ -234,7 +241,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    close_trades();
+    fclose(fp);
 
     if (out != NULL) {
         fclose(out);

@@ -1,0 +1,10 @@
+trade_io: reading C:/Users/joelk/Documents/UNI/YEAR 1/TRI 1/CSC1103-Programming Methodology/PROJECT/DATABASE/dev_1M.csv
+
+--- Stage A Summary ---
+Trades processed: 1000000
+BUY signals: 971
+SELL signals: 971
+Plot slice starts at trade: 1
+Rows written to signals.dat: 1801
+BUY signals in slice: 3
+SELL signals in slice: 2
