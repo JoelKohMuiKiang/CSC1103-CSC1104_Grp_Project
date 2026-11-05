@@ -3,6 +3,7 @@
 #include <string.h>
 #include "trade_io.h"
 #include "led.h"
+#include <unistd.h>
 
 // #define SHORT_WINDOW 40
 // #define LONG_WINDOW  200
@@ -217,6 +218,7 @@ int main(int argc, char *argv[])
             led_off(LED_RED);
             led_state = 0;
         }
+        /*usleep(500000);  // 0.5 seconds */
 
         /* 6. Safe character array string allocation for column placement */
         char sma3_str[32];
