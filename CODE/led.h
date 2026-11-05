@@ -39,12 +39,18 @@ static inline int led_write(int led, const char *file, const char *value) {
 
 static inline void led_init(void) {
 #if defined(__linux__)
-    led_hw = led_write(LED_GREEN, "trigger", "none") && led_write(LED_RED, "trigger", "none");
+    led_hw = led_write(LED_GREEN, "trigger", "none") &&
+             led_write(LED_RED, "trigger", "none");
+
     if (led_hw) {
-        led_write(LED_GREEN, "brightness", "0");
+        // Green (ACT) is inverted: 1 = OFF
+        led_write(LED_GREEN, "brightness", "1");
+
+        // Red (PWR) is normal: 0 = OFF
         led_write(LED_RED, "brightness", "0");
         return;
     }
+
     printf("[led.h] Built-in LED not available (not a Pi 5, or not run with sudo). Printing instead.\n");
 #else
     printf("[led.h] No built-in LED on this computer. Printing instead.\n");
@@ -53,8 +59,18 @@ static inline void led_init(void) {
 
 static inline void led_set(int led, int on) {
 #if defined(__linux__)
-    if (led_hw) { led_write(led, "brightness", on ? "1" : "0"); return; }
+    if (led_hw) {
+        if (led == LED_GREEN) {
+            // Green (ACT) is inverted
+            led_write(led, "brightness", on ? "0" : "1");
+        } else {
+            // Red (PWR) is normal
+            led_write(led, "brightness", on ? "1" : "0");
+        }
+        return;
+    }
 #endif
+
     printf("[LED %s %s]\n", led_name[led], on ? "ON" : "OFF");
 }
 
@@ -63,9 +79,13 @@ static inline void led_off(int led) { led_set(led, 0); }
 
 static inline void led_cleanup(void) {
 #if defined(__linux__)
-    if (led_hw) {                                /* give the LEDs back to the system */
-        led_write(LED_GREEN, "trigger", "mmc0");
-        led_write(LED_RED, "trigger", "default-on");
+    if (led_hw) {
+        // Turn both LEDs off before exiting
+        led_write(LED_GREEN, "brightness", "1");
+        led_write(LED_RED, "brightness", "0");
+
+        // Keep triggers disabled so the system does not
+        // automatically turn the LEDs back on.
     }
 #endif
 }
