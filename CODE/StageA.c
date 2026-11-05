@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-// #include "trade_io.h"
+#include "trade_io.h"
+#include "timing.h"
 #include "StageA+.h"
 
 // #define SHORT_WINDOW 40
@@ -13,8 +14,8 @@
 #define MAX_WINDOW   200
 #define PLOT_TRADES  2000
 
-#define TEST_PATH "C:/Users/joelk/Documents/UNI/YEAR 1/TRI 1/CSC1103-Programming Methodology/PROJECT/DATABASE/test20.csv"
-#define DEV_PATH  "C:/Users/joelk/Documents/UNI/YEAR 1/TRI 1/CSC1103-Programming Methodology/PROJECT/DATABASE/dev_1M.csv"
+#define TEST_PATH "../DATABASE/test20.csv"
+#define DEV_PATH  "../DATABASE/dev_1M.csv"
 
 /* ---------- One-second OHLC bar state ---------- */
 double ohlc_open = 0.0, ohlc_high = 0.0, ohlc_low = 0.0, ohlc_close = 0.0;
@@ -46,8 +47,78 @@ static void update_ohlc(long long ts, double p, int print_bars)
     }
 }
 
+static int benchmark_reader(int use_fast)
+{
+    const char *path = "../DATABASE/stress_full.csv";
+    FILE *fp = NULL;
+    long long trades = 0;
+    long long buys = 0;
+    double total_qty = 0.0;
+    double total_value = 0.0;
+
+    if (use_fast) {
+        fp = fopen(path, "r");
+        if (fp == NULL) {
+            perror(path);
+            return 1;
+        }
+    } else if (!open_trades(path)) {
+        return 1;
+    }
+
+    uint64_t start = now_ns();
+
+    if (use_fast) {
+        long long ts;
+        double price, qty;
+        int is_buy;
+
+        while (read_trade(fp, &ts, &price, &qty, &is_buy)) {
+            trades++;
+            buys += is_buy;
+            total_qty += qty;
+            total_value += price * qty;
+        }
+    } else {
+        while (next_trade()) {
+            double price = trade_price();
+            double qty = trade_qty();
+
+            trades++;
+            buys += trade_is_buy();
+            total_qty += qty;
+            total_value += price * qty;
+        }
+    }
+
+    uint64_t elapsed = now_ns() - start;
+
+    if (use_fast) {
+        fclose(fp);
+    } else {
+        close_trades();
+    }
+
+    printf("Reader: %s\n", use_fast ? "Manual parser" : "sscanf");
+    printf("Trades: %lld\n", trades);
+    printf("Buyer-initiated trades: %lld\n", buys);
+    printf("Total quantity: %.8f\n", total_qty);
+    printf("Total price x quantity: %.6f\n", total_value);
+    printf("Time: %.6f seconds\n", elapsed / 1e9);
+
+    return trades == 0 ? 1 : 0;
+}
+
 int main(int argc, char *argv[])
 {
+
+    if (argc == 2 && strcmp(argv[1], "bench-old") == 0) {
+        return benchmark_reader(0);
+    } 
+    if (argc == 2 && strcmp(argv[1], "bench-fast") == 0) {
+        return benchmark_reader(1);
+    }
+
     int plotting = 0;
     long long plot_start = 1;
 
