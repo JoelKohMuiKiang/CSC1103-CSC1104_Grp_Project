@@ -3,25 +3,32 @@
 #include <string.h>
 #include "trade_io.h"
 
-#define SHORT_WINDOW 40
-#define LONG_WINDOW  200
+// #define SHORT_WINDOW 40
+// #define LONG_WINDOW  200
+#define GROUP_LONG   200
+#define GROUP_SHORT  40
+#define TEST_SHORT   3
+#define TEST_LONG    5
+#define MAX_WINDOW   200
 #define PLOT_TRADES  2000
 
 /* ---------- One-second OHLC bar state ---------- */
-static long long cur_sec = -1;          /* -1 = no bar started yet */
-static double bar_open, bar_high, bar_low, bar_close;
-static int bar_count = 0;  
 double ohlc_open = 0.0, ohlc_high = 0.0, ohlc_low = 0.0, ohlc_close = 0.0;
-long current_sec = -1;
+long long current_sec = -1;
 int ohlc_count = 0;            /* trades in the current bar */
 
 /* Update the bar with one trade; print the finished bar when the second changes. */
-static void update_ohlc(double p)
+static void update_ohlc(double p, int print_bars)
 {
     long long raw_sec = trade_time();     
     long long trade_sec = raw_sec / 1000000LL;  /* integer division drops the microseconds */
 
     if (trade_sec != current_sec) {
+        if (current_sec != -1 && print_bars) {
+            printf("%-14lld%-19.8f%-19.8f%-19.8f%-19.8f%-10d\n",
+                   current_sec, ohlc_open, ohlc_high, ohlc_low,
+                   ohlc_close, ohlc_count);
+        }
         current_sec = trade_sec;
         ohlc_open = p;
         ohlc_high = p;
@@ -40,9 +47,6 @@ int main(int argc, char *argv[])
 {
     int plotting = 0;
     long long plot_start = 1;
-    long long raw_sec = trade_time();     
-    long long trade_sec = raw_sec / 1000000LL;  /* integer division drops the microseconds */
-
 
     /* Choose which dataset to process. */
     if (argc >= 2 && strcmp(argv[1], "plot") == 0) {
@@ -60,6 +64,9 @@ int main(int argc, char *argv[])
         printf("       %s plot [start_trade]\n", argv[0]);
         return 1;
     }
+
+    int short_window = plotting ? GROUP_SHORT : TEST_SHORT;
+    int long_window  = plotting ? GROUP_LONG  : TEST_LONG;
 
     /* Open the correct dataset using your helper library. */
     if (!open_data(plotting ? DEV : TEST20)) {
@@ -83,8 +90,8 @@ int main(int argc, char *argv[])
     double total_qty = 0.0;
 
     /* Circular SMA windows. */
-    double short_prices[SHORT_WINDOW] = {0};
-    double long_prices[LONG_WINDOW] = {0};
+    double short_prices[MAX_WINDOW] = {0};
+    double long_prices[MAX_WINDOW] = {0};
 
     int short_pos = 0;
     int long_pos = 0;
@@ -107,7 +114,7 @@ int main(int argc, char *argv[])
 
     /* Print structural headers matching your target layout */
     if (!plotting) {
-        printf("Expected answers for test20.csv (short window = %d, long window = %d)\n", SHORT_WINDOW, LONG_WINDOW);
+        printf("Expected answers for test20.csv (short window = %d, long window = %d)\n", short_window, long_window);
         printf("is_buy = 1 when isBuyerMaker is False\n");
         printf("SMA values start once the window is full; signals start once both SMAs exist for two trades in a row\n");
         printf("OHLC lines appear when a one-second bar finishes (second = time / 1,000,000)\n\n");
@@ -129,10 +136,10 @@ int main(int argc, char *argv[])
         double vwap = (total_qty > 0.0) ? (total_price_qty / total_qty) : 0.0;
 
         /* 2. Update the one-second OHLC bar (printed only in test mode). */
-        update_ohlc(p);
+        update_ohlc(p, !plotting);
 
         /* 3. Update short circular window. */
-        if (short_count == SHORT_WINDOW) {
+        if (short_count == short_window) {
             short_sum -= short_prices[short_pos];
         } else {
             short_count++;
@@ -140,10 +147,10 @@ int main(int argc, char *argv[])
 
         short_prices[short_pos] = p;
         short_sum += p;
-        short_pos = (short_pos + 1) % SHORT_WINDOW;
+        short_pos = (short_pos + 1) % short_window;
 
         /* 4. Update long circular window. */
-        if (long_count == LONG_WINDOW) {
+        if (long_count == long_window) {
             long_sum -= long_prices[long_pos];
         } else {
             long_count++;
@@ -151,20 +158,20 @@ int main(int argc, char *argv[])
 
         long_prices[long_pos] = p;
         long_sum += p;
-        long_pos = (long_pos + 1) % LONG_WINDOW;
+        long_pos = (long_pos + 1) % long_window;
 
         /* 5. Calculate SMAs when their individual windows are full. */
         double sma_short = 0.0;
         double sma_long = 0.0;
-        int have_short_sma = (short_count == SHORT_WINDOW);
-        int have_long_sma = (long_count == LONG_WINDOW);
+        int have_short_sma = (short_count == short_window);
+        int have_long_sma = (long_count == long_window);
 
         if (have_short_sma) {
-            sma_short = short_sum / SHORT_WINDOW;
+            sma_short = short_sum / short_window;
         }
 
         if (have_long_sma) {
-            sma_long = long_sum / LONG_WINDOW;
+            sma_long = long_sum / long_window;
         }
 
         int signal = 0;
