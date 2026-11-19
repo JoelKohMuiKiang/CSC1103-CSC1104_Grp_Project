@@ -11,9 +11,9 @@
  * Signals can be shown on a coloured terminal (-c) and on the Pi LED (-l).
  * Every signal is also written to signals_log.csv for the rival bot (next step).
  *
- * Build : gcc -O2 StageC.c StageA+.c -o StageC
+ * Build : gcc -O2 StageC.c StageA+.c rival.c -o StageC
  *
- * Usage : ./StageC [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q]
+ * Usage : ./StageC [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US]
  *   -f FILE     data set (default stress)
  *   -s SPEED    replay speed: 1 = real time, 100, 1000, ... ; 0 = no pacing,
  *               process as fast as possible (default 1000)
@@ -23,6 +23,8 @@
  *   -l          drive the LED (green BUY, red SELL); on a laptop it prints
  *               the LED state. Needs sudo on the Pi.
  *   -q          no once-a-second status line
+ *   -o FILE     signal log for the rival bot (default signals_log.csv)
+ *   -r US       rival reaction time in microseconds for the live P&L (default 1)
  *
  * Run from the CODE folder (data is read from ../DATABASE).
  */
@@ -33,6 +35,7 @@
 #include <limits.h>
 #include "StageA+.h"
 #include "led.h"
+#include "rival.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -88,6 +91,11 @@ static long long short_sum = 0, long_sum = 0;
 static long long prev_d = 0;
 static int have_prev = 0;
 static long long total_pq = 0, total_q = 0;
+
+/* ---------- Rival bot (live P&L, see rival.h) ---------- */
+static RivalState rival;
+static uint64_t rival_ns = 1000;             /* standard R = 1 us */
+static const char *log_path = "signals_log.csv";
 
 /* ---------- Signal log ---------- */
 static SignalRecord *sig_log = NULL;
@@ -311,8 +319,14 @@ int main(int argc, char *argv[])
             use_led = 1;
         } else if (strcmp(argv[a], "-q") == 0) {
             quiet = 1;
+        } else if (strcmp(argv[a], "-o") == 0 && a + 1 < argc) {
+            log_path = argv[++a];
+        } else if (strcmp(argv[a], "-r") == 0 && a + 1 < argc) {
+            double r_us = atof(argv[++a]);
+            if (r_us <= 0.0) { printf("Rival time must be > 0\n"); return 1; }
+            rival_ns = (uint64_t)(r_us * 1000.0 + 0.5);
         } else {
-            printf("Usage: %s [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q]\n", argv[0]);
+            printf("Usage: %s [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US]\n", argv[0]);
             return 1;
         }
     }
@@ -352,6 +366,7 @@ int main(int argc, char *argv[])
     printf("\n\n");
 
     if (use_led) led_init();
+    rival_init(&rival);
 
     /* ---------- Replay ---------- */
     unsigned long long lat_sum = 0, lat_max = 0;
@@ -394,13 +409,18 @@ int main(int argc, char *argv[])
         if (signal != 0) {
             if (signal == 1) buy_count++; else sell_count++;
             log_signal(i, signal, proc_ns, latency_ns);
+            /* Rival race: our reaction time is the processing time of this trade. */
+            rival_on_signal(&rival, signal, trades[i].price,
+                            (i + 1 < trade_count) ? trades[i + 1].price : trades[i].price,
+                            proc_ns, rival_ns);
             if (use_colour || use_led) show_signal(signal, i, latency_ns, use_colour, use_led);
         }
 
         /* 4. Once-a-second status line with the lag counter. */
         if (!quiet && decided >= next_status) {
-            printf("\r  replayed %5.1f%%  | lag %9.3f ms | BUY %lld SELL %lld   ",
-                   100.0 * (i + 1) / replay_n, lag_ns / 1e6, buy_count, sell_count);
+            printf("\r  replayed %5.1f%%  | lag %9.3f ms | BUY %lld SELL %lld | P&L %.2f   ",
+                   100.0 * (i + 1) / replay_n, lag_ns / 1e6, buy_count, sell_count,
+                   rival_pnl(&rival));
             fflush(stdout);
             next_status = decided + 1000000000ULL;
         }
@@ -431,6 +451,9 @@ int main(int argc, char *argv[])
            (double)lat_sum / replay_n / 1000.0, lat_max / 1000.0);
     printf("Lag behind replay    : worst %.3f ms, at end %.3f ms\n",
            lag_max_ns / 1e6, lag_ns / 1e6);
+    printf("Rival bot (R = %.2f us): P&L %.2f USDT, races won %lld, lost %lld%s\n",
+           rival_ns / 1000.0, rival_pnl(&rival), rival.races_won, rival.races_lost,
+           rival.holding ? " (still holding 1 BTC)" : "");
 
     printf("\n--- Memory ---\n");
     printf("malloc array (exact fit) : %.1f MB for %lld trades\n",
@@ -440,7 +463,7 @@ int main(int argc, char *argv[])
     print_memory();
 
     /* ---------- Signal log for the rival bot ---------- */
-    FILE *log = fopen("signals_log.csv", "w");
+    FILE *log = fopen(log_path, "w");
     if (log != NULL) {
         fprintf(log, "trade_index,ts_us,price_fx,side,proc_ns,latency_ns\n");
         for (long long s = 0; s < sig_count; s++) {
@@ -450,7 +473,7 @@ int main(int argc, char *argv[])
                     sig_log[s].latency_ns);
         }
         fclose(log);
-        printf("\nWrote %lld signals to signals_log.csv\n", sig_count);
+        printf("\nWrote %lld signals to %s\n", sig_count, log_path);
     }
 
     free(sig_log);
