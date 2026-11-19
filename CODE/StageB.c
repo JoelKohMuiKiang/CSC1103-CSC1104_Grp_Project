@@ -1,47 +1,144 @@
+/*
+ * StageB.c - In-memory engine (Stage B), Group 21
+ *
+ * Loads every trade into a global array of structs (fixed-point integers),
+ * then computes VWAP, short/long SMA and BUY/SELL crossover signals.
+ *
+ * Build : gcc -O2 StageB.c StageA+.c -o StageB
+ *
+ * Usage : ./StageB test  [naive]    20 trades, windows 3/5, prints the table
+ *         ./StageB dev   [naive]    dev_1M.csv, group windows
+ *         ./StageB stress [naive]   stress_full.csv, group windows (benchmark)
+ *         ./StageB plot [start]     2000-trade slice of dev_1M.csv -> signals.dat
+ *
+ * Run from the CODE folder (data is read from ../DATABASE).
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
+#include <limits.h>
 #include <time.h>
-#include "trade_io.h"
+#include "StageA+.h"
 
-#define SHORT_WINDOW 3
-#define LONG_WINDOW 5
+/* ---------- Window sizes ---------- */
+#define GROUP_SHORT 40          /* Group 21 */
+#define GROUP_LONG  200
+#define TEST_SHORT  3           /* test20.csv always uses 3 / 5 */
+#define TEST_LONG   5
 #define PLOT_TRADES 2000
-#define MAX_TRADES 5000000 /* Adjust array size based on dataset capacity */
 
-/* Fixed-point scale factors (suited for 8-decimal price dataset without overflow) */
-#define SCALE_P 100000000LL  /* 10^8 factor for 8 decimal places price precision */
-#define SCALE_Q 10000LL      /* 10^4 factor for 4 decimal places quantity precision */
+/* ---------- Data files ---------- */
+#define TEST_PATH   "../DATABASE/test20.csv"
+#define DEV_PATH    "../DATABASE/dev_1M.csv"
+#define STRESS_PATH "../DATABASE/stress_full.csv"
 
-/* Trade struct using fixed-point long long integers for price and qty */
+/* ---------- Capacity ----------
+ * stress_full.csv has 8,928,944 trades, so the array must be larger than that. */
+#define MAX_TRADES 10000000
+
+/* ---------- Fixed-point scales ----------
+ * Price has 2 significant decimals -> x100.
+ * Qty has 5 significant decimals   -> x100000.
+ * price*qty therefore carries a scale of 10^7.
+ * Worst case: whole-day traded value is about 3.4e9 USDT, which becomes
+ * 3.4e16 and fits in a long long (max about 9.2e18). */
+#define SCALE_P 100LL
+#define SCALE_Q 100000LL
+#define SCALE_PQ (SCALE_P * SCALE_Q)
+
+/* One trade. Fixed-point integers instead of doubles. */
 typedef struct {
-    long long ts_us;   // timestamp, microseconds / trade identifier
-    long long price;   // fixed-point integer (price * SCALE_P) Scaled: price * 10^8
-    long long qty;     // fixed-point integer (qty * SCALE_Q) Scaled: qty * 10^4
-    int is_buy;  // 1 = buy (isBuyerMaker is False), 0 = sell
+    long long ts_us;     /* real timestamp, microseconds since 1970 */
+    long long price;     /* price x SCALE_P */
+    long long qty;       /* qty x SCALE_Q */
+    int is_buy;          /* 1 = buy (isBuyerMaker False), 0 = sell */
 } Trade;
 
-/* Global array allocated outside stack */
+/* Global array: lives outside the stack so millions of trades fit. */
 static Trade trades[MAX_TRADES];
 static long long trade_count = 0;
 
-/* Helper function to measure execution timing */
-double get_time_sec(void) {
+/* Wall-clock helper for timing. */
+static double get_time_sec(void)
+{
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
+/*
+ * load_trades: read the whole file into trades[] using our own fixed-point parser.
+ * Returns the number of trades, or -1 on error.
+ * Also checks (once, outside the processing loop) that the VWAP accumulators
+ * cannot overflow a long long.
+ */
+static long long load_trades(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        printf("Could not open %s\n", path);
+        return -1;
+    }
+
+    long long ts, price, qty;
+    int is_buy;
+    long long n = 0;
+    __int128 pq_total = 0;          /* wide accumulator used only for this check */
+    __int128 q_total = 0;
+
+    while (read_trade_fixed(fp, &ts, &price, &qty, &is_buy)) {
+        if (n >= MAX_TRADES) {
+            printf("Error: file has more than MAX_TRADES (%d) trades\n", MAX_TRADES);
+            fclose(fp);
+            return -1;
+        }
+        trades[n].ts_us = ts;
+        trades[n].price = price;
+        trades[n].qty = qty;
+        trades[n].is_buy = is_buy;
+        pq_total += (__int128)price * qty;
+        q_total += qty;
+        n++;
+    }
+    fclose(fp);
+
+    if (pq_total > LLONG_MAX || q_total > LLONG_MAX) {
+        printf("Error: fixed-point scales are too large, VWAP sums would overflow\n");
+        return -1;
+    }
+    return n;
+}
+
 int main(int argc, char *argv[])
 {
+    const char *path = TEST_PATH;
+    int short_win = TEST_SHORT;
+    int long_win = TEST_LONG;
     int plotting = 0;
-    long long plot_start = 1;
     int naive_mode = 0;
+    int print_table = 0;
+    long long plot_start = 1;
 
-    /* Parse CLI options: test, plot, naive */
-    if (argc >= 2 && strcmp(argv[1], "plot") == 0) {
+    /* ---------- Command line ---------- */
+    if (argc < 2) {
+        printf("Usage: %s test|dev|stress [naive]\n       %s plot [start_trade]\n", argv[0], argv[0]);
+        return 1;
+    }
+    if (strcmp(argv[1], "test") == 0) {
+        print_table = 1;
+    } else if (strcmp(argv[1], "dev") == 0) {
+        path = DEV_PATH;
+        short_win = GROUP_SHORT;
+        long_win = GROUP_LONG;
+    } else if (strcmp(argv[1], "stress") == 0) {
+        path = STRESS_PATH;
+        short_win = GROUP_SHORT;
+        long_win = GROUP_LONG;
+    } else if (strcmp(argv[1], "plot") == 0) {
         plotting = 1;
+        path = DEV_PATH;
+        short_win = GROUP_SHORT;
+        long_win = GROUP_LONG;
         if (argc >= 3) {
             plot_start = atoll(argv[2]);
             if (plot_start < 1) {
@@ -49,38 +146,25 @@ int main(int argc, char *argv[])
                 return 1;
             }
         }
-    } else if (argc >= 2 && strcmp(argv[1], "naive") == 0) {
+    } else {
+        printf("Unknown mode '%s'\n", argv[1]);
+        return 1;
+    }
+    if (argc >= 3 && strcmp(argv[2], "naive") == 0) {
         naive_mode = 1;
-    } else if (argc >= 2 && strcmp(argv[1], "test") != 0) {
-        printf("Usage: %s [test|naive]\n", argv[0]);
-        printf("       %s plot [start_trade]\n", argv[0]);
-        return 1;
     }
 
-    /* Open dataset using trade_io library */
-    if (!open_data(plotting ? DEV : TEST20)) {
-        return 1;
-    }
-
-    /* ----------------------------------------------------
-     * STEP 1: Load data into memory & convert to Fixed-Point Integers
-     * ---------------------------------------------------- */
+    /* ---------- STEP 1: load into memory ---------- */
     double t_load_start = get_time_sec();
-    while (next_trade()) {
-        if (trade_count >= MAX_TRADES) {
-            printf("Warning: Exceeded MAX_TRADES capacity (%d)\n", MAX_TRADES);
-            break;
-        }
-        trades[trade_count].ts_us = trade_number();
-        
-        /* Scale floating point values to long long fixed-point integers */
-        trades[trade_count].price = (long long)llround(trade_price() * SCALE_P);
-        trades[trade_count].qty = (long long)llround(trade_qty() * SCALE_Q);
-        trades[trade_count].is_buy = trade_is_buy();
-        trade_count++;
-    }
-    close_trades();
+    trade_count = load_trades(path);
     double t_load_end = get_time_sec();
+    if (trade_count < 0) {
+        return 1;
+    }
+    if (trade_count < long_win) {
+        printf("Not enough trades (%lld) for the long window (%d)\n", trade_count, long_win);
+        return 1;
+    }
 
     FILE *out = NULL;
     if (plotting) {
@@ -91,204 +175,127 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Output header when running in test/naive mode */
-    if (!plotting) {
-        printf("Expected answers for test20.csv (short window = %d, long window = %d) [%s SMA - FIXED POINT]\n", 
-               SHORT_WINDOW, LONG_WINDOW, naive_mode ? "NAIVE" : "RUNNING-SUM");
-        printf("is_buy = 1 when isBuyerMaker is False\n");
-        printf("SMA values start once the window is full; signals start once both SMAs exist for two trades in a row\n\n");
-        printf("%-6s %-15s %-12s %-6s %-15s %-15s %-15s %s\n", 
-               "trade", "price", "qty", "is_buy", "VWAP", "SMA_3", "SMA_5", "signal");
+    if (print_table) {
+        printf("Stage B (fixed-point) test20.csv, short window = %d, long window = %d [%s SMA]\n",
+               short_win, long_win, naive_mode ? "NAIVE" : "RUNNING-SUM");
+        printf("is_buy = 1 when isBuyerMaker is False\n\n");
+        printf("%-6s %-15s %-12s %-6s %-15s %-15s %-15s %s\n",
+               "trade", "price", "qty", "is_buy", "VWAP", "SMA_short", "SMA_long", "signal");
     }
 
-    /* Fixed-point tracking accumulators */
-    long long total_price_qty = 0; /* Scaled by SCALE_P * SCALE_Q (10^12) */
-    long long total_qty = 0;       /* Scaled by SCALE_Q (10^4) */
-
-    /* Fixed-point circular buffers for running SMA sums */
-    long long short_prices[SHORT_WINDOW] = {0};
-    long long long_prices[LONG_WINDOW] = {0};
-    int short_pos = 0;
-    int long_pos = 0;
-    int short_count = 0;
-    int long_count = 0;
-    long long short_sum = 0;
+    /* ---------- State ---------- */
+    long long total_pq = 0;         /* sum of price*qty, scale SCALE_PQ */
+    long long total_q = 0;          /* sum of qty, scale SCALE_Q */
+    long long short_sum = 0;        /* running window sums, scale SCALE_P */
     long long long_sum = 0;
-
-    /* Signal state tracking (using fixed-point price differences) */
-    long long previous_diff = 0;
-    int have_previous_diff = 0;
+    long long prev_d = 0;           /* previous (scaled) short-long difference */
+    int have_prev = 0;
     long long buy_count = 0;
     long long sell_count = 0;
+    long long plot_rows = 0, plot_buys = 0, plot_sells = 0;
 
-    long long plot_rows = 0;
-    long long plot_buys = 0;
-    long long plot_sells = 0;
-
-    /* ----------------------------------------------------
-     * STEP 2: Process in-memory engine with fixed-point math
-     * ---------------------------------------------------- */
+    /* ---------- STEP 2: process from memory ---------- */
     double t_proc_start = get_time_sec();
 
     for (long long i = 0; i < trade_count; i++) {
-        long long t = trades[i].ts_us;
         long long p = trades[i].price;
         long long q = trades[i].qty;
-        int is_buy = trades[i].is_buy;
 
-        /* 1. VWAP Fixed-Point Accumulation */
-        total_price_qty += p * q;
-        total_qty += q;
-        
-        /* Unscale VWAP for output calculation, value: (price * qty * 10^12) / (qty * 10^4) / 10^8 */
-        double vwap = (total_qty > 0) ? ((double)total_price_qty / (double)total_qty) / SCALE_P : 0.0;
+        /* 1. VWAP: two running integer sums, divide only when printing. */
+        total_pq += p * q;
+        total_q += q;
 
-        long long sma_short = 0;
-        long long sma_long = 0;
-        int have_short_sma = 0;
-        int have_long_sma = 0;
-
-        /* 2 & 3. Fixed-Point SMA Calculation (Naive vs Running-Sum) */
+        /* 2. SMA window sums. */
         if (naive_mode) {
-            /* Naive Mode: Sum window prices from array on each trade */
-            if (i >= SHORT_WINDOW - 1) {
-                have_short_sma = 1;
-                long long sum_s = 0;
-                for (int k = 0; k < SHORT_WINDOW; k++) {
-                    sum_s += trades[i - k].price;
-                }
-                sma_short = sum_s / SHORT_WINDOW;
+            /* Naive: re-add the whole window for every trade. */
+            if (i >= short_win - 1) {
+                long long s = 0;
+                for (int k = 0; k < short_win; k++) s += trades[i - k].price;
+                short_sum = s;
             }
-
-            if (i >= LONG_WINDOW - 1) {
-                have_long_sma = 1;
-                long long sum_l = 0;
-                for (int k = 0; k < LONG_WINDOW; k++) {
-                    sum_l += trades[i - k].price;
-                }
-                sma_long = sum_l / LONG_WINDOW;
+            if (i >= long_win - 1) {
+                long long s = 0;
+                for (int k = 0; k < long_win; k++) s += trades[i - k].price;
+                long_sum = s;
             }
         } else {
-            /* Running-Sum Mode: Update Running Sum via Circular buffer */
-            if (short_count == SHORT_WINDOW) {
-                short_sum -= short_prices[short_pos];
-            } else {
-                short_count++;
-            }
-            short_prices[short_pos] = p;
+            /* Running sum: one add, one subtract. The oldest price is still in
+             * trades[], so no separate circular buffer is needed here. */
             short_sum += p;
-            short_pos = (short_pos + 1) % SHORT_WINDOW;
-
-            if (long_count == LONG_WINDOW) {
-                long_sum -= long_prices[long_pos];
-            } else {
-                long_count++;
-            }
-            long_prices[long_pos] = p;
+            if (i >= short_win) short_sum -= trades[i - short_win].price;
             long_sum += p;
-            long_pos = (long_pos + 1) % LONG_WINDOW;
-
-            have_short_sma = (short_count == SHORT_WINDOW);
-            have_long_sma = (long_count == LONG_WINDOW);
-
-            if (have_short_sma) sma_short = short_sum / SHORT_WINDOW;
-            if (have_long_sma) sma_long = long_sum / LONG_WINDOW;
+            if (i >= long_win) long_sum -= trades[i - long_win].price;
         }
 
-        /* 4. Crossover Detection using Fixed-Point Differences */
-        int signal = 0;
-        if (have_short_sma && have_long_sma) {
-            long long diff = sma_short - sma_long;
+        int have_short = (i >= short_win - 1);
+        int have_long = (i >= long_win - 1);
 
-            if (have_previous_diff) {
-                if (previous_diff <= 0 && diff > 0) {
+        /* 3. Crossover. d = short_sum/short_win - long_sum/long_win.
+         * Multiplying by short_win*long_win (positive) keeps the sign and avoids
+         * integer division, so the comparison is exact (no truncation). */
+        int signal = 0;
+        if (have_short && have_long) {
+            long long d = short_sum * long_win - long_sum * short_win;
+            if (have_prev) {
+                if (prev_d <= 0 && d > 0) {
                     signal = 1;
                     buy_count++;
-                } else if (previous_diff >= 0 && diff < 0) {
+                } else if (prev_d >= 0 && d < 0) {
                     signal = -1;
                     sell_count++;
                 }
             }
-
-            previous_diff = diff;
-            have_previous_diff = 1;
+            prev_d = d;
+            have_prev = 1;
         }
 
-        /* Convert fixed-point values back to double for output formatting display */
-        double p_dbl = (double)p / SCALE_P;
-        double q_dbl = (double)q / SCALE_Q;
-        double sma_short_dbl = (double)sma_short / SCALE_P;
-        double sma_long_dbl = (double)sma_long / SCALE_P;
-
-        /* 5. String Formatting for SMA Display */
-        char sma3_str[32];
-        if (have_short_sma) {
-            sprintf(sma3_str, "%.8f", sma_short_dbl);
-        } else {
-            strcpy(sma3_str, "-");
-        }
-
-        char sma5_str[32];
-        if (have_long_sma) {
-            sprintf(sma5_str, "%.8f", sma_long_dbl);
-        } else {
-            strcpy(sma5_str, "-");
-        }
-
-        const char *sig_str = "";
-        if (signal == 1) {
-            sig_str = "BUY";
-        } else if (signal == -1) {
-            sig_str = "SELL";
-        }
-
-        /* 6. Console Printing */
-        if (!plotting) {
+        /* 4. Output (only in test and plot modes; never while benchmarking). */
+        if (print_table) {
+            double vwap = (double)total_pq / (double)total_q / SCALE_P;
+            char s_str[32], l_str[32];
+            if (have_short) sprintf(s_str, "%.8f", (double)short_sum / short_win / SCALE_P);
+            else strcpy(s_str, "-");
+            if (have_long) sprintf(l_str, "%.8f", (double)long_sum / long_win / SCALE_P);
+            else strcpy(l_str, "-");
             printf("%-6lld %-15.8f %-12.8f %-6d %-15.8f %-15s %-15s %s\n",
-                   t, p_dbl, q_dbl, is_buy, vwap, sma3_str, sma5_str, sig_str);
+                   i + 1, (double)p / SCALE_P, (double)q / SCALE_Q, trades[i].is_buy, vwap,
+                   s_str, l_str, signal == 1 ? "BUY" : (signal == -1 ? "SELL" : ""));
         }
 
-        /* 7. Plotting File Output */
-        if (plotting && t >= plot_start && t < plot_start + PLOT_TRADES) {
-            fprintf(out, "%lld %.8f %.8f %.8f %d\n", t, p_dbl, sma_short_dbl, sma_long_dbl, signal);
+        if (plotting && have_long && i + 1 >= plot_start && i + 1 < plot_start + PLOT_TRADES) {
+            fprintf(out, "%lld %.2f %.4f %.4f %d\n", i + 1, (double)p / SCALE_P,
+                    (double)short_sum / short_win / SCALE_P,
+                    (double)long_sum / long_win / SCALE_P, signal);
             plot_rows++;
-            if (signal == 1) {
-                plot_buys++;
-            } else if (signal == -1) {
-                plot_sells++;
-            }
+            if (signal == 1) plot_buys++;
+            else if (signal == -1) plot_sells++;
         }
     }
+
     double t_proc_end = get_time_sec();
+    if (out != NULL) fclose(out);
 
-    if (out != NULL) {
-        fclose(out);
+    /* ---------- Summary ---------- */
+    double final_vwap = (total_q > 0) ? (double)total_pq / (double)total_q / SCALE_P : 0.0;
+    double load_s = t_load_end - t_load_start;
+    double proc_s = t_proc_end - t_proc_start;
+
+    printf("\nTrades loaded        : %lld\n", trade_count);
+    printf("Windows (short/long) : %d / %d  [%s]\n", short_win, long_win,
+           naive_mode ? "naive" : "running-sum");
+    printf("Final VWAP           : %.8f\n", final_vwap);
+    printf("Signals              : %lld BUY, %lld SELL\n", buy_count, sell_count);
+    if (plotting) {
+        printf("Rows in signals.dat  : %lld (BUY %lld, SELL %lld) starting at trade %lld\n",
+               plot_rows, plot_buys, plot_sells, plot_start);
     }
-
-    /* Summary & Execution Benchmarks */
-    if (!plotting) {
-        if (total_qty > 0) {
-            double final_vwap = ((double)total_price_qty / (double)total_qty) / SCALE_P;
-            printf("\nFinal VWAP: %.8f\n", final_vwap);
-        } else {
-            printf("\nFinal VWAP: 0.00000000\n");
-        }
-        printf("Signals: %lld BUY, %lld SELL\n", buy_count, sell_count);
-    } else {
-        printf("\n--- Stage B Summary (Fixed-Point) ---\n");
-        printf("Trades loaded into memory: %lld\n", trade_count);
-        printf("BUY signals: %lld\n", buy_count);
-        printf("SELL signals: %lld\n", sell_count);
-        printf("Plot slice starts at trade: %lld\n", plot_start);
-        printf("Rows written to signals.dat: %lld\n", plot_rows);
-        printf("BUY signals in slice: %lld\n", plot_buys);
-        printf("SELL signals in slice: %lld\n", plot_sells);
-    }
-
     printf("\n--- Execution Timing ---\n");
-    printf("File Loading Time    : %.6f sec\n", t_load_end - t_load_start);
-    printf("Processing Time (%s): %.6f sec\n", naive_mode ? "Naive" : "Running-Sum", t_proc_end - t_proc_start);
-    printf("Total Execution Time : %.6f sec\n", t_proc_end - t_load_start);
+    printf("Load time            : %.6f s\n", load_s);
+    printf("Processing time      : %.6f s  (%.1f ns/trade, %.2f M trades/s)\n",
+           proc_s, proc_s * 1e9 / trade_count, trade_count / proc_s / 1e6);
+    printf("Total time           : %.6f s\n", t_proc_end - t_load_start);
+    printf("Trade array memory   : %.1f MB static (%zu bytes/trade), %.1f MB used\n",
+           sizeof(trades) / 1048576.0, sizeof(Trade), trade_count * sizeof(Trade) / 1048576.0);
 
     return 0;
 }
