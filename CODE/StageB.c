@@ -294,7 +294,7 @@ int main(int argc, char *argv[])
     printf("Processing time      : %.6f s  (%.1f ns/trade, %.2f M trades/s)\n",
            proc_s, proc_s * 1e9 / trade_count, trade_count / proc_s / 1e6);
     printf("Total time           : %.6f s\n", t_proc_end - t_load_start);
-    printf("Trade array memory   : %.1f MB static (%zu bytes/trade), %.1f MB used\n",
+    printf("Trade array memory   : %.1f MiB static (%zu bytes/trade), %.1f MB used\n",
            sizeof(trades) / 1048576.0, sizeof(Trade), trade_count * sizeof(Trade) / 1048576.0);
 
     return 0;

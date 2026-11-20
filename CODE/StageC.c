@@ -31,6 +31,8 @@
  *   -q          no once-a-second status line
  *   -o FILE     signal log for the rival bot (default signals_log.csv)
  *   -r US       rival reaction time in microseconds for the live P&L (default 1)
+ *   -p          percentile latency: also report p50/p90/p99/p99.9 of the per-trade
+ *               processing time and latency (stores every value, sorts AFTER the run)
  *   --parser   old = original sscanf, fast = custom fixed-point parser (default)
  *   --memory   fixed = Stage B static array, malloc = exact-fit allocation (default)
  *
@@ -99,6 +101,7 @@ static Trade *trades = NULL;
 static long long trade_count = 0;
 static int use_fast_parser = 1;  /* preserve the original Stage C defaults */
 static int use_malloc = 1;
+static int want_pct = 0;         /* -p: report percentile latency */
 static size_t storage_bytes = 0;
 
 /* ---------- Engine state ---------- */
@@ -226,6 +229,40 @@ static long long load_trades(const char *path)
     }
     fclose(fp);
     return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* Percentile latency (stretch goal)                                   */
+/* ------------------------------------------------------------------ */
+
+static int cmp_u64(const void *a, const void *b)
+{
+    unsigned long long x = *(const unsigned long long *)a;
+    unsigned long long y = *(const unsigned long long *)b;
+    return (x > y) - (x < y);
+}
+
+/* Nearest-rank percentile of an ALREADY SORTED array:
+ * the smallest value such that at least pct % of the values are <= it. */
+static unsigned long long percentile_sorted(const unsigned long long *a, long long n, double pct)
+{
+    long long rank = (long long)((pct / 100.0) * (double)n + 0.999999999);  /* ceil */
+    if (rank < 1) rank = 1;
+    if (rank > n) rank = n;
+    return a[rank - 1];
+}
+
+/* Sort a copy-free array in place and print p50 / p90 / p99 / p99.9 / max. */
+static void print_percentiles(const char *label, unsigned long long *a, long long n)
+{
+    qsort(a, (size_t)n, sizeof a[0], cmp_u64);
+    printf("%-22s: p50 %.3f us | p90 %.3f us | p99 %.3f us | p99.9 %.3f us | max %.3f us\n",
+           label,
+           percentile_sorted(a, n, 50.0)  / 1000.0,
+           percentile_sorted(a, n, 90.0)  / 1000.0,
+           percentile_sorted(a, n, 99.0)  / 1000.0,
+           percentile_sorted(a, n, 99.9)  / 1000.0,
+           a[n - 1] / 1000.0);
 }
 
 /* Print resident memory of this process (Linux/Pi only). */
@@ -400,6 +437,8 @@ int main(int argc, char *argv[])
             use_led = 1;
         } else if (strcmp(argv[a], "-q") == 0) {
             quiet = 1;
+        } else if (strcmp(argv[a], "-p") == 0) {
+            want_pct = 1;
         } else if (strcmp(argv[a], "-o") == 0 && a + 1 < argc) {
             log_path = argv[++a];
         } else if (strcmp(argv[a], "-r") == 0 && a + 1 < argc) {
@@ -407,7 +446,7 @@ int main(int argc, char *argv[])
             if (r_us <= 0.0) { printf("Rival time must be > 0\n"); return 1; }
             rival_ns = (uint64_t)(r_us * 1000.0 + 0.5);
         } else {
-            printf("Usage: %s [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US] [--parser old|fast] [--memory fixed|malloc]\n", argv[0]);
+            printf("Usage: %s [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US] [-p] [--parser old|fast] [--memory fixed|malloc]\n", argv[0]);
             return 1;
         }
     }
@@ -460,6 +499,17 @@ int main(int argc, char *argv[])
     long long lag_ns = 0;
     long long ts0 = trades[0].ts_us;
 
+    /* -p only: one slot per replayed trade (allocated BEFORE the timed loop). */
+    unsigned long long *lat_arr = NULL, *proc_arr = NULL;
+    if (want_pct) {
+        lat_arr = malloc((size_t)replay_n * sizeof *lat_arr);
+        proc_arr = malloc((size_t)replay_n * sizeof *proc_arr);
+        if (!lat_arr || !proc_arr) {
+            printf("Could not allocate percentile arrays\n");
+            return 1;
+        }
+    }
+
     uint64_t t_start = now_ns();
     uint64_t next_status = t_start + 1000000000ULL;
 
@@ -489,6 +539,7 @@ int main(int argc, char *argv[])
         proc_sum += proc_ns;
         if (proc_ns > proc_max) proc_max = proc_ns;
         if (lag_ns > lag_max_ns) lag_max_ns = lag_ns;
+        if (lat_arr) { lat_arr[i] = latency_ns; proc_arr[i] = proc_ns; }
 
         /* 3. Signal: log it, then show it (outside the measured time). */
         if (signal != 0) {
@@ -545,10 +596,19 @@ int main(int argc, char *argv[])
            rival_ns / 1000.0, rival_pnl(&rival), rival.races_won, rival.races_lost,
            rival.holding ? " (still holding 1 BTC)" : "");
 
+    /* Percentiles: sorting happens here, after t_end, so it never affects the timings above. */
+    if (want_pct) {
+        printf("\n--- Percentile latency (%lld trades) ---\n", replay_n);
+        print_percentiles("Processing per trade", proc_arr, replay_n);
+        print_percentiles("Latency per trade", lat_arr, replay_n);
+        free(proc_arr);
+        free(lat_arr);
+    }
+
     printf("\n--- Memory ---\n");
     printf("Selected storage (%s) : %.1f MiB for %lld trades\n",
            use_malloc ? "malloc" : "fixed", storage_bytes / 1048576.0, trade_count);
-    printf("Stage B fixed array      : %.1f MB reserved (MAX_TRADES = %d)\n",
+    printf("Stage B fixed array      : %.1f MiB reserved (MAX_TRADES = %d)\n",
            STAGE_B_MAX_TRADES * sizeof(Trade) / 1048576.0, STAGE_B_MAX_TRADES);
     print_memory();
 
