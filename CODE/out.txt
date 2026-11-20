@@ -1,0 +1,23 @@
+Stage C replay: ../DATABASE/stress_full.csv, windows 40/200, running-sum SMA, speed unpaced
+Parser: custom | Memory: malloc
+Trades loaded: 8928944 (storage 272.5 MiB)   load time 1.932 s
+Replaying 8928944 trades covering 86399.8 s of market time
+
+
+--- Replay results ---
+Trades replayed      : 8928944
+Signals              : 10159 BUY, 10115 SELL
+Final VWAP           : 76718.67569889
+Wall time            : 0.606 s
+Benchmark time       : 2.538526 s (load + replay; use for V0-V4)
+Benchmark throughput : 3517374 trades/s
+Processing per trade : avg 22.9 ns, worst 99.600 us
+Latency per trade    : avg 0.045 us, worst 118.500 us
+Lag behind replay    : worst 0.118 ms, at end 0.000 ms
+Rival bot (R = 1.00 us): P&L 146263.55 USDT, races won 20155, lost 1
+
+--- Memory ---
+Selected storage (malloc) : 272.5 MiB for 8928944 trades
+Stage B fixed array      : 305.2 MB reserved (MAX_TRADES = 10000000)
+
+Wrote 20274 signals to l.csv
