@@ -11,9 +11,15 @@
  * Signals can be shown on a coloured terminal (-c) and on the Pi LED (-l).
  * Every signal is also written to signals_log.csv for the rival bot (next step).
  *
- * Build : gcc -O2 StageC.c StageA+.c rival.c -o StageC
+ * Build : gcc -O2 StageC.c StageA+.c rival.c -o StageC -lm
+ *
+ * Benchmark additions (default behavior remains fast parser + malloc):
+ *   --parser old|fast      select original sscanf or custom Stage A+ parser
+ *   --memory fixed|malloc select Stage B's 10M static array or exact-fit malloc
+ *   Benchmark time includes loading and replay (use this for V0-V4 comparisons).
  *
  * Usage : ./StageC [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US]
+ *                  [--parser old|fast] [--memory fixed|malloc]
  *   -f FILE     data set (default stress)
  *   -s SPEED    replay speed: 1 = real time, 100, 1000, ... ; 0 = no pacing,
  *               process as fast as possible (default 1000)
@@ -25,14 +31,21 @@
  *   -q          no once-a-second status line
  *   -o FILE     signal log for the rival bot (default signals_log.csv)
  *   -r US       rival reaction time in microseconds for the live P&L (default 1)
+ *   --parser   old = original sscanf, fast = custom fixed-point parser (default)
+ *   --memory   fixed = Stage B static array, malloc = exact-fit allocation (default)
  *
  * Run from the CODE folder (data is read from ../DATABASE).
  */
+/* Use MinGW's C99 scanf implementation for %lld in the original parser. */
+#ifndef __USE_MINGW_ANSI_STDIO
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
 #include "timing.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <math.h>  /* llround for original floating-point CSV parser */
 #include "StageA+.h"
 #include "led.h"
 #include "rival.h"
@@ -54,7 +67,7 @@
 #define SCALE_P 100LL           /* price x 100 */
 #define SCALE_Q 100000LL        /* qty x 100000 */
 
-/* The fixed-size array of Stage B, kept only to compare memory. */
+/* Stage B fixed-array capacity used by --memory fixed. */
 #define STAGE_B_MAX_TRADES 10000000
 
 /* Sleep only when more than this much waiting is left, then spin. */
@@ -80,8 +93,13 @@ typedef struct {
 } SignalRecord;
 
 /* ---------- Data ---------- */
-static Trade *trades = NULL;     /* malloc'd to fit the file exactly */
+/* Static array: actual Stage B storage when fixed mode is selected. */
+static Trade fixed_trades[STAGE_B_MAX_TRADES];
+static Trade *trades = NULL;
 static long long trade_count = 0;
+static int use_fast_parser = 1;  /* preserve the original Stage C defaults */
+static int use_malloc = 1;
+static size_t storage_bytes = 0;
 
 /* ---------- Engine state ---------- */
 static int short_win = GROUP_SHORT;
@@ -126,7 +144,32 @@ static long long count_lines(const char *path)
     return lines;
 }
 
-/* Load the file into a malloc'd array. Returns the trade count or -1. */
+/* Original Stage A helper's sscanf approach, adapted to return the same
+ * fixed-point Trade representation as the custom Stage A+ reader.
+ * Identical fields and math are used after loading, regardless of parser.
+ * This assumes the project's price/quantity precision (2/5 decimals). */
+static int read_trade_original_fixed(FILE *fp, long long *ts,
+                                     long long *price_fx, long long *qty_fx,
+                                     int *is_buy)
+{
+    char line[256], maker[16], best[16];
+    long long trade_id, timestamp;
+    double price, qty, quote_qty;
+
+    while (fgets(line, sizeof line, fp)) {
+        if (sscanf(line, "%lld,%lf,%lf,%lf,%lld,%15[^,],%15s",
+                   &trade_id, &price, &qty, &quote_qty, &timestamp,
+                   maker, best) != 7) continue;
+        *ts = timestamp;
+        *price_fx = llround(price * SCALE_P);
+        *qty_fx = llround(qty * SCALE_Q);
+        *is_buy = (maker[0] == 'F' || maker[0] == 'f');
+        return 1;
+    }
+    return 0;
+}
+
+/* Load trades using either parser and either storage strategy. */
 static long long load_trades(const char *path)
 {
     long long lines = count_lines(path);
@@ -134,19 +177,47 @@ static long long load_trades(const char *path)
         printf("Could not open %s\n", path);
         return -1;
     }
-    trades = malloc((size_t)lines * sizeof(Trade));
-    if (trades == NULL) {
-        printf("malloc of %lld trades failed\n", lines);
+    if (lines == 0) {
+        printf("The input file is empty\n");
         return -1;
     }
 
+    if (use_malloc) {
+        if ((unsigned long long)lines > SIZE_MAX / sizeof(Trade)) {
+            printf("Dataset is too large to allocate\n");
+            return -1;
+        }
+        storage_bytes = (size_t)lines * sizeof(Trade);
+        trades = malloc(storage_bytes);
+        if (!trades) {
+            printf("malloc of %lld trades failed\n", lines);
+            return -1;
+        }
+    } else {
+        if (lines > STAGE_B_MAX_TRADES) {
+            printf("Fixed array capacity exceeded (%lld > %d)\n",
+                   lines, STAGE_B_MAX_TRADES);
+            return -1;
+        }
+        trades = fixed_trades;
+        storage_bytes = sizeof(fixed_trades);
+    }
+
     FILE *fp = fopen(path, "r");
-    if (fp == NULL) return -1;
+    if (!fp) {
+        if (use_malloc) free(trades);
+        trades = NULL;
+        return -1;
+    }
 
     long long n = 0;
     long long ts, price, qty;
     int is_buy;
-    while (n < lines && read_trade_fixed(fp, &ts, &price, &qty, &is_buy)) {
+    while (n < lines) {
+        int ok = use_fast_parser
+            ? read_trade_fixed(fp, &ts, &price, &qty, &is_buy)
+            : read_trade_original_fixed(fp, &ts, &price, &qty, &is_buy);
+        if (!ok) break;
         trades[n].ts_us = ts;
         trades[n].price = price;
         trades[n].qty = qty;
@@ -313,6 +384,16 @@ int main(int argc, char *argv[])
             max_minutes = atof(argv[++a]);
         } else if (strcmp(argv[a], "-n") == 0) {
             naive_mode = 1;
+        } else if (strcmp(argv[a], "--parser") == 0 && a + 1 < argc) {
+            const char *mode = argv[++a];
+            if (strcmp(mode, "old") == 0) use_fast_parser = 0;
+            else if (strcmp(mode, "fast") == 0) use_fast_parser = 1;
+            else { printf("Parser must be old or fast\n"); return 1; }
+        } else if (strcmp(argv[a], "--memory") == 0 && a + 1 < argc) {
+            const char *mode = argv[++a];
+            if (strcmp(mode, "fixed") == 0) use_malloc = 0;
+            else if (strcmp(mode, "malloc") == 0) use_malloc = 1;
+            else { printf("Memory must be fixed or malloc\n"); return 1; }
         } else if (strcmp(argv[a], "-c") == 0) {
             use_colour = 1;
         } else if (strcmp(argv[a], "-l") == 0) {
@@ -326,7 +407,7 @@ int main(int argc, char *argv[])
             if (r_us <= 0.0) { printf("Rival time must be > 0\n"); return 1; }
             rival_ns = (uint64_t)(r_us * 1000.0 + 0.5);
         } else {
-            printf("Usage: %s [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US]\n", argv[0]);
+            printf("Usage: %s [-f test|dev|stress] [-s SPEED] [-m MINUTES] [-n] [-c] [-l] [-q] [-o FILE] [-r US] [--parser old|fast] [--memory fixed|malloc]\n", argv[0]);
             return 1;
         }
     }
@@ -336,8 +417,9 @@ int main(int argc, char *argv[])
     }
     enable_ansi();
 
-    /* ---------- Load (malloc'd to fit) ---------- */
-    uint64_t load_start = now_ns();
+    /* ---------- Benchmark includes BOTH file loading and replay. ---------- */
+    uint64_t benchmark_start = now_ns();
+    uint64_t load_start = benchmark_start;
     trade_count = load_trades(path);
     double load_s = (now_ns() - load_start) / 1e9;
     if (trade_count < 0) return 1;
@@ -359,8 +441,11 @@ int main(int argc, char *argv[])
     printf("Stage C replay: %s, windows %d/%d, %s SMA, speed %s\n",
            path, short_win, long_win, naive_mode ? "naive" : "running-sum",
            speed == 0.0 ? "unpaced" : "paced");
-    printf("Trades loaded: %lld (malloc %.1f MB)   load time %.3f s\n",
-           trade_count, trade_count * sizeof(Trade) / 1048576.0, load_s);
+    printf("Parser: %s | Memory: %s\n",
+           use_fast_parser ? "custom" : "original sscanf",
+           use_malloc ? "malloc" : "fixed array");
+    printf("Trades loaded: %lld (storage %.1f MiB)   load time %.3f s\n",
+           trade_count, storage_bytes / 1048576.0, load_s);
     printf("Replaying %lld trades covering %.1f s of market time", replay_n, market_span_s);
     if (speed > 0.0) printf(" at %gx (about %.1f s)", speed, market_span_s / speed);
     printf("\n\n");
@@ -427,6 +512,8 @@ int main(int argc, char *argv[])
     }
 
     uint64_t t_end = now_ns();
+    /* Includes load, replay, and minimal fixed setup/summary overhead. */
+    double benchmark_s = (t_end - benchmark_start) / 1e9;
     if (use_led) {
         led_off(LED_GREEN);
         led_off(LED_RED);
@@ -445,6 +532,9 @@ int main(int argc, char *argv[])
     printf("Wall time            : %.3f s", wall_s);
     if (speed > 0.0) printf("   (ideal %.3f s)", market_span_s / speed);
     printf("\n");
+    printf("Benchmark time       : %.6f s (load + replay; use for V0-V4)\n",
+           benchmark_s);
+    printf("Benchmark throughput : %.0f trades/s\n", replay_n / benchmark_s);
     printf("Processing per trade : avg %.1f ns, worst %.3f us\n",
            (double)proc_sum / replay_n, proc_max / 1000.0);
     printf("Latency per trade    : avg %.3f us, worst %.3f us\n",
@@ -456,8 +546,8 @@ int main(int argc, char *argv[])
            rival.holding ? " (still holding 1 BTC)" : "");
 
     printf("\n--- Memory ---\n");
-    printf("malloc array (exact fit) : %.1f MB for %lld trades\n",
-           trade_count * sizeof(Trade) / 1048576.0, trade_count);
+    printf("Selected storage (%s) : %.1f MiB for %lld trades\n",
+           use_malloc ? "malloc" : "fixed", storage_bytes / 1048576.0, trade_count);
     printf("Stage B fixed array      : %.1f MB reserved (MAX_TRADES = %d)\n",
            STAGE_B_MAX_TRADES * sizeof(Trade) / 1048576.0, STAGE_B_MAX_TRADES);
     print_memory();
@@ -477,6 +567,6 @@ int main(int argc, char *argv[])
     }
 
     free(sig_log);
-    free(trades);
+    if (use_malloc) free(trades);
     return 0;
 }
