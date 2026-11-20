@@ -61,7 +61,7 @@ B_BINS := $(foreach s,$(SUFFIXES),build/StageB_$(s))
 C_BINS := $(foreach s,$(SUFFIXES),build/StageC_$(s))
 Z_BINS := $(foreach p,$(STAGE0),$(foreach o,$(STAGE0_O),build/$(p)_$(o)))
 A_BINS := build/StageA build/StageA_Pi
-X_BINS := build/rival_bot build/test_helpers build/test_led
+X_BINS := build/rival_bot build/test_helpers build/test_led build/stretch_soa build/vwap_bench build/timer_res
 
 all: $(A_BINS) $(Z_BINS) $(B_BINS) $(C_BINS) $(X_BINS)
 
@@ -101,6 +101,21 @@ build/test_helpers: test_helpers.c $(HDRS) | build
 
 build/test_led: test_led.c led.h | build
 	$(CC) $(WARN) -O2 test_led.c -o $@
+
+build/stretch_soa: stretch_soa.c StageA+.c $(HDRS) | build
+	$(CC) $(WARN) -O3 stretch_soa.c StageA+.c -o $@ $(LDLIBS)
+
+build/timer_res: timer_res.c timing.h | build
+	$(CC) $(WARN) -O2 timer_res.c -o $@
+
+# vwap_bench: the AArch64 assembly row only exists on the Pi
+ifdef NATIVE
+build/vwap_bench: vwap_bench.c StageA+.c vwap_kernel_a64.S $(HDRS) | build
+	$(CC) $(WARN) -O3 -mcpu=cortex-a76 vwap_bench.c StageA+.c vwap_kernel_a64.S -o $@ $(LDLIBS)
+else
+build/vwap_bench: vwap_bench.c StageA+.c $(HDRS) | build
+	$(CC) $(WARN) -O3 vwap_bench.c StageA+.c -o $@ $(LDLIBS)
+endif
 
 # ---------------------------------------------------------------- test
 # test20.csv always uses short = 3, long = 5. Compare the printed table with

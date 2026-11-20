@@ -11,6 +11,7 @@ UoG-PMCOA_Group21/
 ├── README.md                this file
 ├── PMCOAReportGroup21.pdf   report (submitted with the zip)
 ├── CODE/                    all C source, Makefile, tests, plots, results
+    └── results/             benchmark logs, perf output, signals.dat/png
 └── DATABASE/
     └── test20.csv           (dev_1M.csv and stress_full.csv are NOT in the zip)
 ```
@@ -47,8 +48,36 @@ Binaries produced (in `build/`):
 | `StageC_O0/O2/O3[/O3_a76]` | Stage C: `malloc`'d array, timestamp-paced replay, latency, LED/colour signal, rival bot |
 | `rival_bot` | Rival-bot sweep (money lost vs rival reaction time R) |
 | `test_helpers`, `test_led` | Check `timing.h` and `led.h` on this machine |
+| `stretch_soa` | Stretch: Array-of-Structs vs Struct-of-Arrays kernels |
+| `vwap_bench` | Stretch: VWAP kernel in C vs unrolled C vs AArch64 assembly (assembly row Pi only) |
+| `timer_res` | Prints the smallest step `now_ns()` can resolve on this machine |
 
 `_O3_a76` is built only on the Pi (`-O3 -mcpu=cortex-a76`).
+
+### Build on Windows (MinGW GCC, PowerShell, no make)
+
+For Windows users who do not have `make` installed, compile the programs directly using GCC in PowerShell.
+
+```powershell
+cd CODE
+
+foreach ($o in 'O0','O2','O3') {
+    gcc -$o -Wall StageB.c StageA+.c -o StageB_$o
+    gcc -$o -Wall StageC.c StageA+.c rival.c -o StageC_$o
+}
+
+gcc -O2 StageA.c trade_io.c StageA+.c -o StageA
+gcc -O3 stretch_soa.c StageA+.c -o stretch_soa
+gcc -O2 timer_res.c -o timer_res
+```
+
+Run the full benchmarking ladder:
+
+```powershell
+.\bench_ladder.ps1
+```
+
+Benchmark results are saved to `results/bench_ladder.log`.
 
 ## Run
 
@@ -108,20 +137,24 @@ sudo ./build/StageC_O3_a76 -f stress -s 1000 -c -l         # terminal 2: fastest
 make rival         # runs both versions unpaced, sweeps R, writes rival_sweep.csv + money_lost.png
 ```
 
-## Tests
+**Stretch goals**
 
 ```sh
-make test
+./build/stretch_soa stress       # AoS vs SoA
+python3 stage_a_pure.py stress   # Stage A in plain Python
+python3 stage_a_numpy.py stress  # Stage A with NumPy (needs numpy)
+./build/vwap_bench stress        # VWAP kernels (assembly row on the Pi only)
 ```
 
-Runs automatically and exits non-zero on any failure:
 
-* Stage A, Stage B (running-sum), Stage B (naive) and Stage C all give the same
-  trade table, final VWAP and BUY/SELL counts on `test20.csv`;
-* if `DATABASE/test20_expected.txt` exists, Stage A's output is diffed against it;
-* if `DATABASE/dev_1M.csv` exists, every version raises exactly the same signals
-  on it with the group windows (`test20.csv` itself produces no crossings, so
-  this is the check that exercises BUY/SELL).
+## Tests
+
+`make test` runs Stage A, Stage B and Stage C on `test20.csv` (windows 3/5) and
+prints the trade table, final VWAP and signal counts. Compare this output with the
+official `test20_expected.txt` (saved as `results/test20_diff.txt`). On `dev_1M.csv`
+(group windows 40/200) all versions must report the same BUY/SELL counts, since
+`test20.csv` itself produces no crossings.
+
 
 ## Benchmarking (Raspberry Pi 5)
 
@@ -141,12 +174,13 @@ make asm                                             # build/StageC_O2.s, build/
 Use `DATA=dev` (e.g. `make bench DATA=dev`) for quick tests on `dev_1M.csv`.
 `CPU=n` changes the pinned core. Reboot afterwards to restore the LED's normal behaviour.
 
+## Benchmarking on a laptop (Windows)
+`.\bench_ladder.ps1` runs V0...V4 five times each on `stress_full.csv` and writes the median and speedup to `results\bench_ladder.log`.
+
 ## Source map
 
 | File | Role |
 |---|---|
-| `tick_config.h` | **Single source of truth**: group windows, data paths, fixed-point scales, `Trade` struct |
-| `engine.h` | The engine step shared by Stage B and C (VWAP sums, running-sum or naive SMA, crossover) as `static inline` |
 | `StageA+.c/.h` | Our own `read_trade()` (pointer out-parameters) and hand-written parsers (double and fixed-point) |
 | `StageA.c`, `StageA_Pi.c` | Stage A: circular-buffer SMA, OHLC bars, signals, plot output |
 | `StageB.c` | Stage B: global `Trade` array, fixed-point, naive vs running-sum |
@@ -154,8 +188,10 @@ Use `DATA=dev` (e.g. `make bench DATA=dev`) for quick tests on `dev_1M.csv`.
 | `rival.c/.h`, `rival_bot.c` | Rival-bot model and the R sweep |
 | `timing.h`, `led.h`, `trade_io.c/.h` | Provided helpers (timing, LED, helper library) |
 | `plot_signals`, `plot_rival` | gnuplot scripts for `signals.png` and `money_lost.png` |
-| `tests/check_test20.sh` | Automatic correctness check used by `make test` |
-| `make_submission.sh` | Builds `UoG-PMCOA.zip` (`make dist`) |
+| `StageB.c`, `StageC.c` | Each holds its own `#define`s (`GROUP_SHORT 40`, `GROUP_LONG 200`, fixed-point scales `STAGE_B_MAX_TRADES`) and the `Trade` struct; the engine step is the main loop in StageB and `engine_step()` in StageC |
+| `stretch_soa.c`, `vwap_bench.c`, `vwap_kernel_a64.S` | Stretch goals: SoA, VWAP assembly kernel |
+| `stage_a_pure.py`, `stage_a_numpy.py` | Stretch goal: C vs Python |
+| `timer_res.c`, `bench_ladder.ps1` | Timer resolution check, laptop benchmark script |
 
 ## Design notes and assumptions
 
